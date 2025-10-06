@@ -1,64 +1,59 @@
 pipeline {
-  agent any
+    agent any
 
-  environment {
-    HELM_RELEASE = "myapp"
-    HELM_CHART_PATH = "helm"
-    KUBE_NAMESPACE = "default"
-    KUBECONFIG_CREDENTIALS_ID = "kubeconfig-file" // Jenkins Secret file containing your Minikube kubeconfig
-  }
-
-  stages {
-    stage('Checkout') {
-      steps {
-        checkout scm
-      }
+    environment {
+        DOCKERHUB_CREDENTIALS = credentials('dockerhub-cred')  // Jenkins stored creds (username+password/token)
+        DOCKERHUB_REPO = "abhinshyam/myapp"                   // your DockerHub repo
     }
 
-    stage('Set Image Tag') {
-      steps {
-        script {
-          IMAGE_TAG = sh(script: "git rev-parse --short HEAD", returnStdout: true).trim()
-          env.IMAGE_TAG = IMAGE_TAG
-          echo "Using image tag: ${env.IMAGE_TAG}"
+    stages {
+        stage('Checkout') {
+            steps {
+                git branch: 'main', url: 'https://github.com/abhin-shyam/reporepo.git'
+            }
         }
-      }
-    }
 
-    stage('Build Docker Image inside Minikube') {
-      steps {
-        sh '''
-          # Point Docker CLI to Minikube’s Docker daemon
-          eval $(minikube docker-env)
-          docker build -t myapp:${IMAGE_TAG} .
-        '''
-      }
-    }
-
-    stage('Deploy to Minikube (Helm)') {
-      steps {
-        withCredentials([file(credentialsId: "${KUBECONFIG_CREDENTIALS_ID}", variable: 'KUBECONFIG')]) {
-          sh '''
-            export KUBECONFIG=${KUBECONFIG}
-            helm repo update || true
-            helm upgrade --install ${HELM_RELEASE} ${HELM_CHART_PATH} \
-              --namespace ${KUBE_NAMESPACE} \
-              --create-namespace \
-              --set image.repository=myapp \
-              --set image.tag=${IMAGE_TAG} \
-              --set image.pullPolicy=IfNotPresent
-          '''
+        stage('Set Image Tag') {
+            steps {
+                script {
+                    IMAGE_TAG = sh(script: "git rev-parse --short HEAD", returnStdout: true).trim()
+                    echo "Using image tag: ${IMAGE_TAG}"
+                }
+            }
         }
-      }
-    }
-  }
 
-  post {
-    success {
-      echo "✅ Deployment successful! Access with: minikube service ${HELM_RELEASE}-myapp"
+        stage('Docker Build & Push') {
+            steps {
+                script {
+                    sh """
+                        echo "${DOCKERHUB_CREDENTIALS_PSW}" | docker login -u "${DOCKERHUB_CREDENTIALS_USR}" --password-stdin
+                        docker build -t ${DOCKERHUB_REPO}:${IMAGE_TAG} .
+                        docker push ${DOCKERHUB_REPO}:${IMAGE_TAG}
+                    """
+                }
+            }
+        }
+
+        stage('Deploy to Minikube (Helm)') {
+            steps {
+                script {
+                    sh """
+                        export KUBECONFIG=$HOME/.kube/config
+                        helm upgrade --install myapp ./helm/myapp \
+                            --set image.repository=${DOCKERHUB_REPO} \
+                            --set image.tag=${IMAGE_TAG}
+                    """
+                }
+            }
+        }
     }
-    failure {
-      echo "❌ Build/Deploy failed. Check logs."
+
+    post {
+        success {
+            echo "✅ Build and deploy successful"
+        }
+        failure {
+            echo "❌ Build/Deploy failed. Check logs."
+        }
     }
-  }
 }
