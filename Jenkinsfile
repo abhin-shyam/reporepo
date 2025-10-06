@@ -2,16 +2,10 @@ pipeline {
   agent any
 
   environment {
-    DOCKER_REPO = "yourdockerhubuser/myapp"   // update
     HELM_RELEASE = "myapp"
     HELM_CHART_PATH = "helm"
     KUBE_NAMESPACE = "default"
-    // Important: create Jenkins credentials with these IDs and update below:
-    DOCKERHUB_CREDENTIALS_ID = "dockerhub-creds"
-    KUBECONFIG_CREDENTIALS_ID = "kubeconfig-file"  // Jenkins "Secret file" containing kubeconfig
-    JIRA_CREDENTIALS_ID = "jira-creds" // username/password (username + APIToken)
-    // optional: GITHUB_TOKEN to comment/mark PRs
-    GITHUB_CREDENTIALS_ID = "github-token"
+    KUBECONFIG_CREDENTIALS_ID = "kubeconfig-file" // Jenkins Secret file containing your Minikube kubeconfig
   }
 
   stages {
@@ -31,24 +25,17 @@ pipeline {
       }
     }
 
-    stage('Build Docker Image') {
+    stage('Build Docker Image inside Minikube') {
       steps {
-        sh "docker build -t ${DOCKER_REPO}:${IMAGE_TAG} ."
+        sh '''
+          # Point Docker CLI to Minikube’s Docker daemon
+          eval $(minikube docker-env)
+          docker build -t myapp:${IMAGE_TAG} .
+        '''
       }
     }
 
-    stage('Push to Docker Hub') {
-      steps {
-        withCredentials([usernamePassword(credentialsId: "${DOCKERHUB_CREDENTIALS_ID}", usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
-          sh '''
-            echo $DOCKER_PASS | docker login -u $DOCKER_USER --password-stdin
-            docker push ${DOCKER_REPO}:${IMAGE_TAG}
-          '''
-        }
-      }
-    }
-
-    stage('Deploy to Kubernetes (Helm)') {
+    stage('Deploy to Minikube (Helm)') {
       steps {
         withCredentials([file(credentialsId: "${KUBECONFIG_CREDENTIALS_ID}", variable: 'KUBECONFIG')]) {
           sh '''
@@ -56,51 +43,22 @@ pipeline {
             helm repo update || true
             helm upgrade --install ${HELM_RELEASE} ${HELM_CHART_PATH} \
               --namespace ${KUBE_NAMESPACE} \
-              --set image.repository=${DOCKER_REPO} \
-              --set image.tag=${IMAGE_TAG}
+              --create-namespace \
+              --set image.repository=myapp \
+              --set image.tag=${IMAGE_TAG} \
+              --set image.pullPolicy=IfNotPresent
           '''
-        }
-      }
-    }
-
-    stage('Notify JIRA') {
-      steps {
-        script {
-          // Attempt to extract a Jira key from commit message (e.g. ABC-123)
-          JIRA_KEY = sh(script: "git log -1 --pretty=%B | grep -o -E '[A-Z]+-[0-9]+' | head -1 || true", returnStdout: true).trim()
-          if (JIRA_KEY) {
-            withCredentials([usernamePassword(credentialsId: "${JIRA_CREDENTIALS_ID}", usernameVariable: 'JIRA_USER', passwordVariable: 'JIRA_TOKEN')]) {
-              sh """
-                curl -u $JIRA_USER:$JIRA_TOKEN -X POST -H 'Content-Type: application/json' \
-                  --data '{ "body": "Build & deploy successful: ${DOCKER_REPO}:${IMAGE_TAG} deployed to ${KUBE_NAMESPACE} (Jenkins build ${env.BUILD_URL})" }' \
-                  https://<YOUR_JIRA_DOMAIN>.atlassian.net/rest/api/2/issue/${JIRA_KEY}/comment
-              """
-            }
-          } else {
-            echo "No JIRA key found in commit message — skipping JIRA update."
-          }
         }
       }
     }
   }
 
   post {
+    success {
+      echo "✅ Deployment successful! Access with: minikube service ${HELM_RELEASE}-myapp"
+    }
     failure {
-      script {
-        // Optionally update Jira with failure info
-        JIRA_KEY = sh(script: "git log -1 --pretty=%B | grep -o -E '[A-Z]+-[0-9]+' | head -1 || true", returnStdout: true).trim()
-        if (JIRA_KEY) {
-          withCredentials([usernamePassword(credentialsId: "${JIRA_CREDENTIALS_ID}", usernameVariable: 'JIRA_USER', passwordVariable: 'JIRA_TOKEN')]) {
-            sh """
-              curl -u $JIRA_USER:$JIRA_TOKEN -X POST -H 'Content-Type: application/json' \
-                --data '{ "body": "Build or deploy failed for commit ${env.GIT_COMMIT ?: 'unknown'}. See Jenkins: ${env.BUILD_URL}" }' \
-                https://<YOUR_JIRA_DOMAIN>.atlassian.net/rest/api/2/issue/${JIRA_KEY}/comment
-            """
-          }
-        } else {
-          echo "No JIRA key found — cannot update Jira on failure."
-        }
-      }
+      echo "❌ Build/Deploy failed. Check logs."
     }
   }
 }
