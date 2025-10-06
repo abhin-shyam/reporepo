@@ -1,12 +1,10 @@
 replicaCount: 1
 
 image:
-  repository: yourdockerhubuser/myapp
-  tag: latest
+  repository: myapp       # local image built inside Minikube
+  tag: latest             # overridden by Jenkins with commit SHA
   pullPolicy: IfNotPresent
 
 service:
-  type: ClusterIP
+  type: NodePort          # Minikube doesn’t support LoadBalancer
   port: 80
-
-resources: {}
